@@ -1,12 +1,22 @@
 package Fabrica_EAP05.Reservas.Config;
 
 
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import tools.jackson.databind.ObjectMapper;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
@@ -14,8 +24,13 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.OncePerRequestFilter;
 
+import java.io.IOException;
+import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Configuration
 @EnableMethodSecurity
@@ -23,7 +38,8 @@ public class SecurityConfig {
 
     @Autowired
     private JwtFilter jwtFilter;
-
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
@@ -55,7 +71,20 @@ public class SecurityConfig {
 
             // 3. Configurar permisos de rutas
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/login", "/api/auth/logout", "/api/usuario/registrar").permitAll()
+                // El preflight CORS (OPTIONS) no matchea contra requestMatchers(String...)
+                // porque Spring MVC no expone OPTIONS como handler real de la ruta;
+                // sin esta línea, cualquier request con Content-Type: application/json
+                // (que dispara preflight) cae en anyRequest().authenticated() -> 403.
+                .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/usuario/registrar").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/logout").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/reset-password").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/forgot-password").permitAll()
+                    // RESTRICCIÓN ESPECÍFICA DE ROL:
+                    .requestMatchers(HttpMethod.POST, "/api/proveedor-servicio/asignar").hasAnyRole("administrador", "ADMIN")
+                    .requestMatchers("/error").permitAll()
+                .requestMatchers("/swagger-ui.html", "/swagger-ui/**", "/v3/api-docs", "/v3/api-docs/**").permitAll()
                 .anyRequest().authenticated()
             )
 
@@ -65,7 +94,30 @@ public class SecurityConfig {
 
             // 5. Configurar manejo de sesión como Stateless (sin sesión HTTP, ideal para JWT)
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+            // TEMPORAL: quitar una vez identificada la causa del 403 en Render.
+            // Corre después de JwtFilter para mostrar exactamente lo que va a
+            // evaluar el AuthorizationFilter (authorizeHttpRequests) al final de la cadena.
+            .exceptionHandling(exceptions -> exceptions
+                // Sin token válido / no autenticado -> 401 con mensaje claro
+                .authenticationEntryPoint((request, response, authException) -> {
+                response.setStatus(401);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                Map<String, Object> body = new HashMap<>();
+                body.put("timestamp", OffsetDateTime.now().toString());
+                body.put("mensaje", "No autenticado: debes iniciar sesion para acceder a este recurso");
+                response.getWriter().write(objectMapper.writeValueAsString(body));
+            })
+            .accessDeniedHandler((request, response, accessDeniedException) -> {
+                response.setStatus(403);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                Map<String, Object> body = new HashMap<>();
+                body.put("timestamp", OffsetDateTime.now().toString());
+                body.put("mensaje", "No tienes permiso para acceder a este recurso");
+                response.getWriter().write(objectMapper.writeValueAsString(body));
+            }));
+            
         return http.build();
     }
+
 }
